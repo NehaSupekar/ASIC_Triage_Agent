@@ -1,0 +1,14 @@
+# Local Databases & Storage
+chroma_db/
+chroma_db_storage/
+
+# Python environment noise
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+venv/
+.DS_Store
+
+# Local sample logs (optional, if you want users to start fresh)
+logs/test_*.log

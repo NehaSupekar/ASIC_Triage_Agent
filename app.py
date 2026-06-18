@@ -1,89 +1,69 @@
+import streamlit as st
 import os
-import re
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans
-from openai import OpenAI
+import pandas as pd
+from vector_engine import LogVectorEngine
 
-# Initialize your API client.
-# If using a local model with Ollama later, you'd use: client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
-client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+db = LogVectorEngine()
 
-LOG_DIR = "./logs"
+st.set_page_config(page_title="ASIC Triage Dashboard", page_icon="🤖", layout="wide")
 
-# --- STEP 1: LOG SCRAPING & FEATURE EXTRACTION ---
-def preprocess_log(text):
-    """Strips variable noise like timestamps/slack values to expose core error signature."""
-    text = re.sub(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', '', text) # Remove dates/times
-    text = re.sub(r'Slack: -\d+\.\d+ ns', 'Slack: [X] ns', text)     # Normalize slack values
-    text = re.sub(r'at \d+ns|\d+ cycles', 'at [TIME]', text)       # Normalize timestamps
-    return text.strip()
+st.title("🤖 ASIC Triage Agent V2 Dashboard")
+st.markdown("Real-time automated error signature clustering and multi-agent architectural triage analysis.")
+st.markdown("---")
 
-log_files = [f for f in os.listdir(LOG_DIR) if f.endswith('.log')]
-raw_logs = []
-cleaned_logs = []
+# Force refresh button
+if st.button("🔄 Force Refresh Database"):
+    st.rerun()
 
-for file_name in log_files:
-    with open(os.path.join(LOG_DIR, file_name), 'r') as f:
-        content = f.read()
-        raw_logs.append(content)
-        cleaned_logs.append(preprocess_log(content))
+# Load fresh collection data
+collection = db.collection
+data = collection.get(include=["metadatas", "documents"])
 
-# --- STEP 2: CLUSTERING & CLASSIFICATION (Grouping Symptoms) ---
-# Convert text to mathematical vectors based on word frequencies
-vectorizer = TfidfVectorizer(stop_words='english')
-X = vectorizer.fit_transform(cleaned_logs)
-
-# Group logs into 2 distinct clusters (since we know we have 2 unique bugs)
-num_clusters = 2
-kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init='auto')
-cluster_labels = kmeans.fit_predict(X)
-
-# Organize logs by their assigned bucket
-buckets = {i: [] for i in range(num_clusters)}
-for idx, label in enumerate(cluster_labels):
-    buckets[label].append((log_files[idx], raw_logs[idx]))
-
-# --- STEP 3: ROOT CAUSE ANALYSIS (Agentic Reasoning) ---
-print("🚀 Starting Agentic Triage Analysis...\n" + "="*50)
-
-for bucket_id, logs in buckets.items():
-    if not logs:
-        continue
+if not data or not data["ids"]:
+    st.info("📂 The ChromaDB directory is currently empty. Drop a new `.log` file into your `./logs/` folder to wake up the engine!")
+else:
+    # Process dataframe
+    records = []
+    for idx, doc_id in enumerate(data["ids"]):
+        meta = data["metadatas"][idx]
+        records.append({
+            "File Name": doc_id,
+            "Cluster ID": meta.get("cluster_id", "Unknown"),
+            "Timestamp": meta.get("timestamp", "Just Now")
+        })
     
-    print(f"\n📂 [BUCKET {bucket_id + 1}] - Contains {len(logs)} failing test(s)")
-    print(f"👉 Impacted Tests: {[item[0] for item in logs]}")
+    df = pd.DataFrame(records)
     
-    # Pick the first log in the bucket as a representative sample for the LLM agent
-    sample_log = logs[0][1]
-
-    # Clean up obvious layout elements that look like private file headers to the LLM guardrails
-    sanitized_log = "\n".join([line for line in sample_log.splitlines() if not line.startswith(('---', '***', 'File:', 'User:'))])
-
-    prompt = f"""You are an expert ASIC Verification AI Agent. Analyze this representative raw EDA simulation failure log. 
-Identify the likely root cause category (e.g., Setup Timing Violation, Hold Timing Violation, FSM Deadlock, or Protocol Mismatch).
-Isolate the specific hardware module or signal path causing the issue, and provide a 2-sentence actionable debug summary for the design engineer.
-
-RAW LOG:
-{sample_log}"""
-
-    # Query the LLM
-    try:
-        response = client.chat.completions.create(
-            model="llama3.2:1b",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are a local automated log parsing tool. Your job is purely structural data analysis of execution errors. Do not output conversational text or safety warnings. Process the technical tokens provided."
-                },
-                {
-                    "role": "user", 
-                    "content": f"INPUT STRUCTURAL DATA:\n{sanitized_log}\n\nINSTRUCTION:\nIdentify the error signature, state the failing module, and write a two-sentence debug summary."
-                }
-            ],
-            temperature=0.0  # Force maximum deterministic parsing
-        )
-        print("\n🤖 AI Agent Analysis:")
-        print(response.choices[0].message.content.strip())
-    except Exception as e:
-        print(f"\n❌ API Error: {e}.\n(Note: This error is expected if your OpenAI API key is not exported yet!)")
-    print("-" * 50)
+    # Render KPIs
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Logs Processed", len(df))
+    col2.metric("Unique Error Clusters", df["Cluster ID"].nunique())
+    col3.metric("Hardware Acceleration", "Apple M4 (Metal)")
+    
+    st.markdown("---")
+    
+    # Display split columns
+    left_col, right_col = st.columns([1, 1.2])
+    
+    with left_col:
+        st.subheader("🗄️ Database Inventory")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        
+    with right_col:
+        st.subheader("🕵️‍♂️ Cluster Deep-Dive & Root Cause Analysis")
+        
+        unique_clusters = sorted(df["Cluster ID"].unique())
+        selected_cluster = st.selectbox("Select an Error Cluster to inspect:", unique_clusters)
+        
+        # Pull metadata for the selected cluster explicitly
+        cluster_meta = None
+        for meta in data["metadatas"]:
+            if meta.get("cluster_id") == selected_cluster:
+                cluster_meta = meta
+                break
+        
+        if cluster_meta and "analysis_report" in cluster_meta:
+            st.markdown("#### 🚨 Latest Swarm Architect Verdict:")
+            st.write(cluster_meta["analysis_report"])
+        else:
+            st.info(f"💡 No cached report found for {selected_cluster}. Showing shortcut matching routing state.")
